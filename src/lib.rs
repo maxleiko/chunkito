@@ -4,10 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Error};
 use memmap2::{Mmap, MmapOptions};
 use rayon::iter::plumbing::{bridge, Producer};
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-    IntoParallelRefMutIterator, ParallelIterator,
-};
+use rayon::iter::*;
 
 pub struct Chunkit {
     mmap: Mmap,
@@ -28,10 +25,6 @@ impl Chunkit {
 
     pub fn par_iter(&self) -> ParChunkIter<'_> {
         self.chunks.par_iter()
-    }
-
-    pub fn par_iter_mut(&mut self) -> ParChunkIterMut<'_> {
-        self.chunks.par_iter_mut()
     }
 
     pub fn data(&self, chunk: Chunk) -> &str {
@@ -61,10 +54,6 @@ impl Iterator for ChunkIter {
 
 pub struct ParChunkIter<'a> {
     chunks: &'a [Chunk],
-}
-
-pub struct ParChunkIterMut<'a> {
-    chunks: &'a mut ChunkIter,
 }
 
 impl<'a> ParallelIterator for ParChunkIter<'a> {
@@ -105,24 +94,6 @@ struct ChunkProducer<'a> {
     chunks: &'a [Chunk],
 }
 
-struct ChunkProducerMut<'a> {
-    chunks: &'a mut [Chunk],
-}
-
-impl<'a> From<&'a mut [Chunk]> for ChunkProducerMut<'a> {
-    fn from(chunks: &'a mut [Chunk]) -> Self {
-        Self { chunks }
-    }
-}
-
-impl<'a> From<ParChunkIterMut<'a>> for ChunkProducerMut<'a> {
-    fn from(iterator: ParChunkIterMut<'a>) -> Self {
-        Self {
-            chunks: &mut iterator.chunks.chunks,
-        }
-    }
-}
-
 impl<'a> Producer for ChunkProducer<'a> {
     type Item = &'a Chunk;
     type IntoIter = ::std::slice::Iter<'a, Chunk>;
@@ -137,20 +108,6 @@ impl<'a> Producer for ChunkProducer<'a> {
             ChunkProducer { chunks: left },
             ChunkProducer { chunks: right },
         )
-    }
-}
-
-impl<'a> Producer for ChunkProducerMut<'a> {
-    type Item = &'a mut Chunk;
-    type IntoIter = std::slice::IterMut<'a, Chunk>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.chunks.iter_mut()
-    }
-
-    fn split_at(self, index: usize) -> (Self, Self) {
-        let (left, right) = self.chunks.split_at_mut(index);
-        (Self::from(left), Self::from(right))
     }
 }
 
@@ -170,47 +127,6 @@ impl<'a> IntoParallelIterator for &'a ChunkIter {
         ParChunkIter {
             chunks: &self.chunks,
         }
-    }
-}
-
-impl<'a> IntoParallelIterator for &'a mut ChunkIter {
-    type Iter = ParChunkIterMut<'a>;
-    type Item = &'a mut Chunk;
-
-    fn into_par_iter(self) -> Self::Iter {
-        ParChunkIterMut { chunks: self }
-    }
-}
-
-impl<'a> ParallelIterator for ParChunkIterMut<'a> {
-    type Item = &'a mut Chunk;
-    fn drive_unindexed<C>(self, consumer: C) -> C::Result
-    where
-        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
-    {
-        bridge(self, consumer)
-    }
-
-    fn opt_len(&self) -> Option<usize> {
-        Some(<Self as IndexedParallelIterator>::len(self))
-    }
-}
-
-impl<'a> IndexedParallelIterator for ParChunkIterMut<'a> {
-    fn with_producer<CB: rayon::iter::plumbing::ProducerCallback<Self::Item>>(
-        self,
-        callback: CB,
-    ) -> CB::Output {
-        let producer = ChunkProducerMut::from(self);
-        callback.callback(producer)
-    }
-
-    fn drive<C: rayon::iter::plumbing::Consumer<Self::Item>>(self, consumer: C) -> C::Result {
-        bridge(self, consumer)
-    }
-
-    fn len(&self) -> usize {
-        self.chunks.chunks.len()
     }
 }
 
