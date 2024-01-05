@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     let last_index = sensors.len() - 1;
     sensors.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-    let result = File::create("results.csv").context("unable to create result.csv")?;
+    let result = File::create("results.txt").context("unable to create results.txt")?;
     let mut writer = BufWriter::new(result);
     writer.write_all(b"{")?;
     for (index, (name, Sensor { min, sum, cnt, max })) in sensors.into_iter().enumerate() {
@@ -68,13 +68,6 @@ fn main() -> anyhow::Result<()> {
     writer.write_all(b"}")?;
 
     Ok(())
-}
-
-struct NamedSensor<'a> {
-    name: &'a str,
-    min: f32,
-    max: f32,
-    avg: f32,
 }
 
 struct Sensor {

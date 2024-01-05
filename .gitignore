@@ -1,2 +1,5 @@
 /target
 /chunk-*.json
+/flamegraph.svg
+/perf.data
+/perf.data.*
