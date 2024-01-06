@@ -8,10 +8,9 @@ use anyhow::Context;
 use chunkit::chunk_it;
 use fxhash::FxHashMap;
 use memmap2::MmapOptions;
-use smol_str::SmolStr;
 
 fn main() -> anyhow::Result<()> {
-    let chunks = chunk_it("../measurements.txt", 14).context("unable to chunk the file")?;
+    let chunks = chunk_it("../measurements.txt", 12).context("unable to chunk the file")?;
     eprintln!("processing {} chunks:\n{chunks:?}", chunks.len());
 
     let handles = chunks
@@ -52,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     for (index, (name, Sensor { min, sum, cnt, max })) in sensors.into_iter().enumerate() {
         writer
             .write_fmt(format_args!(
-                "{name:?}={min:.1}/{:.1}/{max:.1}",
+                "{name}={min:.1}/{:.1}/{max:.1}",
                 sum / cnt as f32
             ))
             .context("unable to write")?;
@@ -66,8 +65,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn merge_results(chunk_results: Vec<FxHashMap<SmolStr, Sensor>>) -> Vec<(SmolStr, Sensor)> {
-    let mut all_sensors: FxHashMap<SmolStr, Sensor> = fxhash::FxHashMap::default();
+fn merge_results(chunk_results: Vec<FxHashMap<Box<str>, Sensor>>) -> Vec<(Box<str>, Sensor)> {
+    let mut all_sensors: FxHashMap<Box<str>, Sensor> = fxhash::FxHashMap::default();
     for sensors in chunk_results {
         for (name, s) in sensors {
             all_sensors
@@ -81,11 +80,11 @@ fn merge_results(chunk_results: Vec<FxHashMap<SmolStr, Sensor>>) -> Vec<(SmolStr
     sensors
 }
 
-fn process_chunk(data: &[u8]) -> FxHashMap<SmolStr, Sensor> {
+fn process_chunk(data: &[u8]) -> FxHashMap<Box<str>, Sensor> {
     let eof = data.len();
 
-    let mut sensors: FxHashMap<SmolStr, Sensor> = fxhash::FxHashMap::default();
-    let mut name = None;
+    let mut sensors: FxHashMap<Box<str>, Sensor> = fxhash::FxHashMap::default();
+    let mut name = String::new();
     let mut prev = 0;
     let mut curr = 0;
     loop {
@@ -96,7 +95,8 @@ fn process_chunk(data: &[u8]) -> FxHashMap<SmolStr, Sensor> {
             b';' => {
                 let text = unsafe { std::str::from_utf8_unchecked(&data[prev..curr]) };
                 // eprintln!("name=\"{text}\"");
-                name.replace(SmolStr::from(text));
+                name.clear();
+                name.push_str(text);
                 curr += 1;
                 // moving on
                 prev = curr;
@@ -107,7 +107,7 @@ fn process_chunk(data: &[u8]) -> FxHashMap<SmolStr, Sensor> {
 
                 // line completed, record it
                 sensors
-                    .entry(name.clone().unwrap())
+                    .entry(name.clone().into_boxed_str())
                     .and_modify(|s| s.add_temp(temp))
                     .or_insert_with(|| Sensor::new(temp));
 
