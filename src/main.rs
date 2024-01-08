@@ -1,21 +1,31 @@
+use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
 use std::result::Result;
+use std::thread::ScopedJoinHandle;
 use std::time::Instant;
-use std::{fs::File, thread::JoinHandle};
 
 use anyhow::{Context, Error};
-use fxhash::FxHashMap;
 use memmap2::MmapOptions;
 
 type Symbol = String;
+type HashMap = ahash::AHashMap<Symbol, Sensor>;
 
 fn main() -> anyhow::Result<()> {
-    let chunks = chunk_it("../measurements.txt", 12).context("unable to chunk the file")?;
+    let nb_threads = num_cpus::get();
+    let file = File::open("../measurements.txt").context("unable to open file")?;
+    let mmap = unsafe {
+        MmapOptions::new()
+            .map(&file)
+            .context("unable to mmap the file")?
+    };
+    // mmap.advise(memmap2::Advice::Sequential)
+    //     .context("unable to set mmap advice sequential")?;
+
+    let chunks = chunk_it(&mmap, nb_threads).context("unable to chunk the file")?;
     eprintln!("processing {} chunks...", chunks.len());
 
     let start = Instant::now();
-    let sensors = process_chunks(chunks)?;
+    let sensors = process_chunks(&chunks)?;
     eprintln!("processing time {:?}", start.elapsed());
 
     let start = Instant::now();
@@ -31,15 +41,9 @@ fn main() -> anyhow::Result<()> {
 
 // TODO make sure we are not in an escaped LF when trying to find('\n')
 // cause right now that's a bug
-pub fn chunk_it<P: AsRef<Path>>(path: P, nb_chunks: usize) -> Result<Vec<Chunk>, Error> {
-    let file = File::open(path).context("unable to open file")?;
-    let mmap = unsafe {
-        MmapOptions::new()
-            .map_copy_read_only(&file)
-            .context("unable to mmap the file")?
-    };
-    let data = unsafe { std::str::from_utf8_unchecked(&mmap) };
-    
+pub fn chunk_it(buf: &[u8], nb_chunks: usize) -> Result<Vec<Chunk<'_>>, Error> {
+    let data = unsafe { std::str::from_utf8_unchecked(buf) };
+
     let eof = data.len();
 
     let mut chunks = Vec::with_capacity(nb_chunks);
@@ -59,11 +63,16 @@ pub fn chunk_it<P: AsRef<Path>>(path: P, nb_chunks: usize) -> Result<Vec<Chunk>,
         match data[end..].find('\n') {
             Some(lf) => {
                 end += lf + 1;
-                chunks.push(Chunk { start: offset, end });
+                chunks.push(Chunk {
+                    data: &buf[offset..end],
+                    start: offset,
+                    end,
+                });
                 offset = end;
             }
             None => {
                 chunks.push(Chunk {
+                    data: &buf[offset..end],
                     start: offset,
                     end: eof,
                 });
@@ -75,42 +84,34 @@ pub fn chunk_it<P: AsRef<Path>>(path: P, nb_chunks: usize) -> Result<Vec<Chunk>,
     Ok(chunks)
 }
 
-fn process_chunks(chunks: Vec<Chunk>) -> anyhow::Result<Vec<FxHashMap<Symbol, Sensor>>> {
-    let file = File::open("../measurements.txt").expect("potato");
-    let handles = chunks
-        .into_iter()
-        .map(|chunk| {
-            let file = file.try_clone().expect("unable to clone file fd");
-            std::thread::spawn(move || {
-                let start = Instant::now();
-                let tid = std::thread::current().id();
-                let mmap = unsafe {
-                    MmapOptions::new()
-                        .map(&file)
-                        .expect("unable to mmap the file")
-                };
-                mmap.advise(memmap2::Advice::Sequential)
-                    .expect("mmap advise failed");
-                let sensors = process_chunk(&mmap[chunk.start..chunk.end]);
-                eprintln!("{tid:?} took {:?}", start.elapsed(),);
-                sensors
+fn process_chunks(chunks: &[Chunk<'_>]) -> anyhow::Result<Vec<HashMap>> {
+    let sensors = std::thread::scope(move |ctx| {
+        let handles = chunks
+            .iter()
+            .map(|chunk| {
+                ctx.spawn(move || {
+                    let start = Instant::now();
+                    let tid = std::thread::current().id();
+                    let sensors = process_chunk(chunk);
+                    eprintln!("{tid:?} took {:?}", start.elapsed(),);
+                    sensors
+                })
             })
-        })
-        .collect::<Vec<JoinHandle<_>>>();
+            .collect::<Vec<ScopedJoinHandle<_>>>();
 
-    let sensors = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("unable to join thread"))
-        .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("unable to join thread"))
+            .collect::<Vec<_>>()
+    });
 
     Ok(sensors)
 }
 
-fn process_chunk(data: &[u8]) -> FxHashMap<Symbol, Sensor> {
-    let total = data.len();
+fn process_chunk(chunk: &Chunk<'_>) -> HashMap {
+    let total = chunk.data.len();
 
-    let mut sensors: FxHashMap<Symbol, Sensor> =
-        fxhash::FxHashMap::with_capacity_and_hasher(450, Default::default());
+    let mut sensors = HashMap::with_capacity(450);
     let mut name = String::with_capacity(25);
     let mut prev = 0;
     let mut curr = 0;
@@ -119,9 +120,9 @@ fn process_chunk(data: &[u8]) -> FxHashMap<Symbol, Sensor> {
             break;
         }
 
-        match data[curr] {
+        match chunk.data[curr] {
             b';' => {
-                let text = unsafe { std::str::from_utf8_unchecked(&data[prev..curr]) };
+                let text = unsafe { std::str::from_utf8_unchecked(&chunk.data[prev..curr]) };
                 // eprintln!("name=\"{text}\"");
                 name.clear();
                 name.push_str(text);
@@ -130,7 +131,7 @@ fn process_chunk(data: &[u8]) -> FxHashMap<Symbol, Sensor> {
                 prev = curr;
             }
             b'\n' => {
-                let text = unsafe { std::str::from_utf8_unchecked(&data[prev..curr]) };
+                let text = unsafe { std::str::from_utf8_unchecked(&chunk.data[prev..curr]) };
                 let temp = text.parse::<f32>().unwrap();
 
                 // line completed, record it
@@ -174,8 +175,8 @@ fn write_results(sensors: Vec<(Symbol, Sensor)>, path: &str) -> anyhow::Result<(
     Ok(())
 }
 
-fn merge_results(chunk_results: Vec<FxHashMap<Symbol, Sensor>>) -> Vec<(Symbol, Sensor)> {
-    let mut all_sensors: FxHashMap<Symbol, Sensor> = fxhash::FxHashMap::default();
+fn merge_results(chunk_results: Vec<HashMap>) -> Vec<(Symbol, Sensor)> {
+    let mut all_sensors = HashMap::default();
     for sensors in chunk_results {
         for (name, s) in sensors {
             all_sensors
@@ -191,7 +192,8 @@ fn merge_results(chunk_results: Vec<FxHashMap<Symbol, Sensor>>) -> Vec<(Symbol, 
 
 /// A chunk contains lines without overlapping
 #[derive(Clone, Copy, Debug)]
-pub struct Chunk {
+pub struct Chunk<'a> {
+    pub data: &'a [u8],
     pub start: usize,
     pub end: usize,
 }
