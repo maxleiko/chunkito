@@ -1,16 +1,15 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::result::Result;
 use std::thread::ScopedJoinHandle;
 use std::time::Instant;
 
-use anyhow::{Context, Error};
+use anyhow::{anyhow, Context, Error, Result};
 use memmap2::MmapOptions;
 
 type Symbol = String;
 type HashMap = ahash::AHashMap<Symbol, Sensor>;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let nb_threads = num_cpus::get();
     let file = File::open("../measurements.txt").context("unable to open file")?;
     let mmap = unsafe {
@@ -84,7 +83,7 @@ pub fn chunk_it(buf: &[u8], nb_chunks: usize) -> Result<Vec<Chunk<'_>>, Error> {
     Ok(chunks)
 }
 
-fn process_chunks(chunks: &[Chunk<'_>]) -> anyhow::Result<Vec<HashMap>> {
+fn process_chunks(chunks: &[Chunk<'_>]) -> Result<Vec<HashMap>> {
     let sensors = std::thread::scope(move |ctx| {
         let handles = chunks
             .iter()
@@ -93,7 +92,7 @@ fn process_chunks(chunks: &[Chunk<'_>]) -> anyhow::Result<Vec<HashMap>> {
                     let start = Instant::now();
                     let tid = std::thread::current().id();
                     let sensors = process_chunk(chunk);
-                    eprintln!("{tid:?} took {:?}", start.elapsed(),);
+                    eprintln!("{tid:?} took {:?}", start.elapsed());
                     sensors
                 })
             })
@@ -101,14 +100,18 @@ fn process_chunks(chunks: &[Chunk<'_>]) -> anyhow::Result<Vec<HashMap>> {
 
         handles
             .into_iter()
-            .map(|handle| handle.join().expect("unable to join thread"))
-            .collect::<Vec<_>>()
-    });
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|err| anyhow!("unable to join the thread ({err:?})"))?
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
 
     Ok(sensors)
 }
 
-fn process_chunk(chunk: &Chunk<'_>) -> HashMap {
+fn process_chunk(chunk: &Chunk<'_>) -> Result<HashMap> {
     let total = chunk.data.len();
 
     let mut sensors = HashMap::with_capacity(450);
@@ -132,7 +135,7 @@ fn process_chunk(chunk: &Chunk<'_>) -> HashMap {
             }
             b'\n' => {
                 let text = unsafe { std::str::from_utf8_unchecked(&chunk.data[prev..curr]) };
-                let temp = text.parse::<f32>().unwrap();
+                let temp = text.parse::<f32>().context("unable to parse float")?;
 
                 // line completed, record it
                 sensors
@@ -151,10 +154,10 @@ fn process_chunk(chunk: &Chunk<'_>) -> HashMap {
         }
     }
 
-    sensors
+    Ok(sensors)
 }
 
-fn write_results(sensors: Vec<(Symbol, Sensor)>, path: &str) -> anyhow::Result<()> {
+fn write_results(sensors: Vec<(Symbol, Sensor)>, path: &str) -> Result<()> {
     let result = File::create(path).context("unable to create results.txt")?;
     let mut writer = BufWriter::new(result);
     writer.write_all(b"{")?;
