@@ -8,10 +8,13 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.79"
 fxhash = "0.2.1"
+libc = { version = "0.2.151", features = ["align"] }
 memmap2 = "0.9.3"
 num_cpus = "1.16.0"
+rayon = "1.8.0"
 serde = { version = "1.0.194", features = ["derive"] }
 serde_json = "1.0.111"
+tokio-uring = "0.4.0"
 
 [profile.release]
 debug = true
